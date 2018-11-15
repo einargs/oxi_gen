@@ -6,7 +6,11 @@ use oxi_gen::oxi;
 /// The default parser name is `oxi_parser`.
 /// If this test compiles, it is successful.
 fn it_works() {
-  oxi! { }
+  enum Token {}
+  oxi! {
+    %token Token
+    %start Token
+  }
 
   let parser = oxi_parser;
 }
@@ -15,9 +19,24 @@ fn it_works() {
 /// Renaming the parser works.
 /// If this test compiles, it is successful.
 fn can_give_name_option() {
+  enum Token {}
   oxi! {
     %name parser
+    %token Token
+    %start Token
   }
 
   let name = parser;
+}
+
+#[test]
+///
+fn integration_test() {
+  enum Token {}
+  oxi! {
+    %name parser
+    %public
+    %token Token
+    %start Token
+  }
 }
