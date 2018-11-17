@@ -9,10 +9,10 @@ extern crate syn;
 extern crate quote;
 
 use proc_macro::{TokenStream};
-use proc_macro2::{Ident, Span, TokenStream as TokenStream2};
+use proc_macro2::{Ident, Span, TokenTree, TokenStream as TokenStream2};
 
-use syn::parse::{Parse, ParseBuffer, ParseStream, Result};
-use syn::{Token, parse_macro_input, Visibility};
+use syn::parse::{Parse, ParseStream, Result};
+use syn::{Token, parse_quote, parse_macro_input, Type};
 use quote::{ToTokens, quote};
 
 
@@ -23,15 +23,32 @@ enum ConfigOption {
   /// The visibility of the generated parser function.
   Public,
   /// The type used to represent the tokens
-  Token(Ident),
+  TokenType(Type),
   /// The entry symbol the parser should start at.
   /// In other words, this is the root AST node and
   /// the type the parser will return.
   Start(Ident),
+  /// Declares a list of tokens as left associative
+  LeftAssoc(Vec<Ident>),
+  /// Declares a list of tokens as right associative
+  RightAssoc(Vec<Ident>),
+  /// Declares a list of tokens as nonassociative
+  NonAssoc(Vec<Ident>),
+  /// Declares a list of tokens with a precedence
+  Precedence(Vec<Ident>),
 }
 
 impl Parse for ConfigOption {
   fn parse(input: ParseStream) -> Result<Self> {
+    fn parse_list(input: ParseStream) -> Result<Vec<Ident>> {
+      let mut list: Vec<Ident> = vec![];
+      
+      while !input.peek(Token![%]) {
+        list.push(input.parse()?);
+      }
+
+      Ok(list)
+    }
     input.parse::<Token![%]>()?;
     let config_option: Ident = input.parse()?;
 
@@ -42,32 +59,117 @@ impl Parse for ConfigOption {
       "public" => {
         Ok(ConfigOption::Public)
       },
-      "token" => {
-        Ok(ConfigOption::Token(input.parse()?))
+      "token_type" => {
+        Ok(ConfigOption::TokenType(input.parse()?))
       },
       "start" => {
         Ok(ConfigOption::Start(input.parse()?))
       },
-      _ => {
+      "token" => {
+        //TODO: implement `%token` config option.
+        // Should look like:
+        // ```
+        // %token {
+        //  int Token::Number($$)
+        //  var Token::Variable($$)
+        //  '+' Token::Plus
+        //  '*' Token::Times
+        //  '(' Token::OpenParen
+        //  ')' Token::CloseParen
+        // }
+        panic!("`token` config not implemented yet");
+      },
+      "left" => {
+        //panic!("`left` config option not implemented yet");
+        Ok(ConfigOption::LeftAssoc(input.call(parse_list)?))
+      },
+      "right" => {
+        //panic!("`right` config option not implemented yet");
+        Ok(ConfigOption::RightAssoc(input.call(parse_list)?))
+      },
+      "nonassoc" => {
+        //panic!("`nonassoc` config option not implemented yet");
+        Ok(ConfigOption::NonAssoc(input.call(parse_list)?))
+      },
+      "precedence" => {
+        //panic!("`precedence` config option not implemented yet");
+        Ok(ConfigOption::Precedence(input.call(parse_list)?))
+      },
+      config_name => {
         // TODO: actually return an error
-        panic!("Error: unknown config name");
+        panic!("Error: unknown config name `{}`", config_name);
       },
     }
   }
 }
 
-///
+/// 
+#[derive(Clone)]
 struct Production {
   ident: Ident,
+  typ: Type,
+  arms: Vec<ProductionArm>,
 }
+
+///
+#[derive(Debug, Clone)]
+struct ProductionArm {
+  symbols: Vec<Symbol>,
+  code: TokenTree,
+}
+
+/// Represents both terminal (tokens) and non-terminal symbols
+/// as written inside a production.
+#[derive(Debug, Clone)]
+struct Symbol(String);
 
 impl Parse for Production {
   fn parse(input: ParseStream) -> Result<Self> {
-    let ident: Ident = input.parse()?;
+
+    let ident = input.parse()?;
+    input.parse::<Token![:]>()?;
+    let typ = input.parse()?;
+    input.parse::<Token![=]>()?;
+    let mut arms: Vec<ProductionArm> = vec![
+      input.parse::<ProductionArm>()?
+    ];
+
+    while !input.peek(Token![;]) {
+      input.parse::<Token![|]>()?;
+      arms.push(input.parse()?);
+    }
+
+    input.parse::<Token![;]>()?;
 
     Ok(Production {
-      ident
+      ident,
+      typ,
+      arms,
     })
+  }
+}
+
+impl Parse for ProductionArm {
+  fn parse(input: ParseStream) -> Result<Self> {
+    let mut symbols: Vec<Symbol> = vec![];
+
+    while !input.peek(syn::token::Brace) {
+      symbols.push(input.parse()?);
+    }
+
+    let code = input.parse()?;
+
+    Ok(ProductionArm {
+      symbols,
+      code,
+    })
+  }
+}
+
+impl Parse for Symbol {
+  fn parse(input: ParseStream) -> Result<Self> {
+    let ident: Ident = input.parse()?;
+    Ok(Symbol(ident.to_string()))
   }
 }
 
@@ -105,7 +207,6 @@ impl Term {
     }
   }
 }
-
 impl Parse for Term {
   fn parse(input: ParseStream) -> Result<Self> {
     let term = if input.peek(Token![%]) {
@@ -141,9 +242,8 @@ struct OxiConfig {
   /// have the `pub` modifier in front of it.
   public: bool,
   /// The type of the tokens that are passed to the parser.
-  token_type: Ident,
+  token_type: Type,
   /// The entry production.
-  /// Note that this is also the return type.
   start_production: Ident,
 }
 
@@ -160,7 +260,7 @@ impl OxiConfig {
     struct TempOxiConfig {
       name: Option<Ident>,
       public: Option<bool>,
-      token_type: Option<Ident>,
+      token_type: Option<Type>,
       start_production: Option<Ident>,
     }
       
@@ -179,11 +279,24 @@ impl OxiConfig {
         ConfigOption::Start(ident) => {
           config.start_production = Some(ident.clone());
         },
-        ConfigOption::Token(ident) => {
-          config.token_type = Some(ident.clone());
+        ConfigOption::TokenType(typ) => {
+          config.token_type = Some(typ.clone());
         },
         ConfigOption::Public => {
           config.public = Some(true);
+        },
+        //TODO: implement associative options and precendence
+        ConfigOption::LeftAssoc(token_idents) => {
+          
+        },
+        ConfigOption::RightAssoc(token_idents) => {
+
+        },
+        ConfigOption::NonAssoc(token_idents) => {
+
+        },
+        ConfigOption::Precedence(token_idents) => {
+
         },
       };
     }
@@ -199,7 +312,7 @@ impl OxiConfig {
       start_production: config.start_production.unwrap_or_else(|| {
         terms.iter()
           .filter_map(Term::production)
-          .map(|Production { ident }| ident)
+          .map(|Production { ident, .. }| ident)
           .next()
           .expect("Macro should have at least one production")
           .clone()
@@ -210,6 +323,7 @@ impl OxiConfig {
 
 struct OxiSyntax {
   config: OxiConfig,
+  productions: Vec<Production>,
 }
 
 impl Parse for OxiSyntax {
@@ -218,6 +332,10 @@ impl Parse for OxiSyntax {
 
     Ok(OxiSyntax {
       config: OxiConfig::from_terms(&terms),
+      productions: terms.iter()
+        .filter_map(Term::production)
+        .cloned()
+        .collect(),
     })
   }
 }
@@ -231,10 +349,19 @@ pub fn oxi(input: TokenStream) -> TokenStream {
       start_production, 
       token_type,
     },
+    productions,
   } = parse_macro_input!(input as OxiSyntax);
 
+  let pub_syn = if public { quote!(pub) } else { quote!() };
+  let ret_type: Type =
+    if let Some(prod) = productions.get(0) {
+      prod.typ.clone()
+    } else {
+      parse_quote!(!)
+    };
+
   let tokens = quote! {
-    fn #name() -> #start_production {
+    #pub_syn fn #name() -> #ret_type {
       panic!("Have not yet implemented the parser generator");
     }
   };
